@@ -49,12 +49,33 @@ func main() {
 
 	// Вопросы для бота
 	questions := []string{
-		"Постоянный или временный?",
+		"Какой пропуск? Постоянный или временный?",
 		"ФИО сотрудника, которому нужен пропуск?",
 		"Отдел, в котором работает сотрудник?",
 		"Когда сотрудник начал у нас работать?",
 		"Причина получения пропуска: Новый / Утерянный / Восстановление?",
 	}
+
+	// Создание inline-кнопок для выбора типа пропуска
+	inlineMenu := &telebot.ReplyMarkup{}
+	btnPermanent := inlineMenu.Data("Постоянный пропуск", "permanent")
+	btnTemporary := inlineMenu.Data("Временный пропуск", "temporary")
+
+	// Настраиваем кнопки для первого вопроса
+	inlineMenu.Inline(
+		inlineMenu.Row(btnPermanent, btnTemporary),
+	)
+
+	// Создание inline-кнопок для выбора причины получения пропуска
+	reasonMenu := &telebot.ReplyMarkup{}
+	btnNew := reasonMenu.Data("Новый", "new")
+	btnLost := reasonMenu.Data("Утерянный", "lost")
+	btnRestore := reasonMenu.Data("Восстановление", "restore")
+
+	// Настраиваем кнопки для последнего вопроса
+	reasonMenu.Inline(
+		reasonMenu.Row(btnNew, btnLost, btnRestore),
+	)
 
 	// Обработчик команды /start
 	bot.Handle("/start", func(c telebot.Context) error {
@@ -66,18 +87,44 @@ func main() {
 			Answers: make(map[string]string),
 		}
 
-		// Отправляем первый вопрос
-		question := questions[0]
-		if err := c.Send(question); err != nil {
-			log.Printf("Ошибка отправки вопроса пользователю %d: %v\n", chatID, err)
-			return err
-		}
-		log.Printf("Первый вопрос отправлен пользователю %d: %s\n", chatID, question)
-
-		return nil
+		// Отправляем первый вопрос с кнопками
+		return c.Send("Чтобы выдать пропуск, выберите тип пропуска:", inlineMenu)
 	})
 
-	// Обработчик текстовых сообщений для вопросов
+	// Обработчик inline-кнопок "Постоянный пропуск" и "Временный пропуск"
+	bot.Handle(&btnPermanent, func(c telebot.Context) error {
+		chatID := c.Chat().ID
+		state, exists := userStates[chatID]
+
+		if !exists {
+			return c.Send("Напиши /start, чтобы начать!")
+		}
+
+		// Сохранение ответа
+		state.Answers["type"] = "Постоянный пропуск"
+
+		// Переход к следующему шагу
+		state.Step++
+		return c.Send(questions[state.Step])
+	})
+
+	bot.Handle(&btnTemporary, func(c telebot.Context) error {
+		chatID := c.Chat().ID
+		state, exists := userStates[chatID]
+
+		if !exists {
+			return c.Send("Напиши /start, чтобы начать!")
+		}
+
+		// Сохранение ответа
+		state.Answers["type"] = "Временный пропуск"
+
+		// Переход к следующему шагу
+		state.Step++
+		return c.Send(questions[state.Step])
+	})
+
+	// Обработчик текстовых сообщений для остальных вопросов
 	bot.Handle(telebot.OnText, func(c telebot.Context) error {
 		chatID := c.Chat().ID
 		state, exists := userStates[chatID]
@@ -89,16 +136,12 @@ func main() {
 
 		// Сохранение ответа пользователя
 		switch state.Step {
-		case 0:
-			state.Answers["type"] = c.Text()
 		case 1:
 			state.Answers["name"] = c.Text()
 		case 2:
 			state.Answers["department"] = c.Text()
 		case 3:
 			state.Answers["date"] = c.Text()
-		case 4:
-			state.Answers["reason"] = c.Text()
 		}
 
 		log.Printf("Ответ пользователя сохранен. Текущий шаг: %d, Пользователь %d\n", state.Step, chatID)
@@ -106,7 +149,12 @@ func main() {
 		// Переход к следующему шагу
 		state.Step++
 
-		// Если все вопросы заданы, отправляем результат в группу
+		// Если это последний вопрос перед выбором типа получения пропуска
+		if state.Step == 4 {
+			return c.Send("Причина получения пропуска:", reasonMenu)
+		}
+
+		// Если вопросы закончились, отправляем результат в группу
 		if state.Step >= len(questions) {
 			result := generateTemplate(state.Answers)
 			delete(userStates, chatID) // Удаляем состояние пользователя
@@ -135,8 +183,46 @@ func main() {
 		return nil
 	})
 
+	// Обработчик inline-кнопок для типа получения пропуска
+	bot.Handle(&btnNew, func(c telebot.Context) error {
+		return handleFinalStep(bot, c, "Новый", userStates, targetChatID)
+	})
+	bot.Handle(&btnLost, func(c telebot.Context) error {
+		return handleFinalStep(bot, c, "Утерянный", userStates, targetChatID)
+	})
+	bot.Handle(&btnRestore, func(c telebot.Context) error {
+		return handleFinalStep(bot, c, "Восстановление", userStates, targetChatID)
+	})
+
 	log.Println("Бот запущен и готов принимать команды...")
 	bot.Start()
+}
+
+// Обработка последнего шага
+func handleFinalStep(bot *telebot.Bot, c telebot.Context, reason string, userStates map[int64]*UserState, targetChatID int64) error {
+	chatID := c.Chat().ID
+	state, exists := userStates[chatID]
+
+	if !exists {
+		return c.Send("Напиши /start, чтобы начать!")
+	}
+
+	// Сохранение ответа
+	state.Answers["reason"] = reason
+
+	// Завершение опроса и отправка результата
+	result := generateTemplate(state.Answers)
+	delete(userStates, chatID) // Удаляем состояние пользователя
+
+	// Отправляем результат в целевой чат (группу)
+	recipient := &telebot.Chat{ID: targetChatID}
+	if _, err := bot.Send(recipient, result); err != nil {
+		log.Printf("Ошибка отправки результата в группу с ID %d: %v\n", targetChatID, err)
+		return err
+	}
+	log.Printf("Результат успешно отправлен в группу с ID %d\n", targetChatID)
+
+	return nil
 }
 
 // Генерация текста из шаблона
